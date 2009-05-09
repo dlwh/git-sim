@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# git-sim, version 0.1
+# dlwh@cs.stanford.edu
+#
+# Adapted from git-issues by
+# by John Wiegley <johnw@newartisans.com>
+
+import platform
+
+from os.path import split, join, exists, dirname
+from os import getcwd, makedirs, execv
+from shutil import copy
+from sys import argv
+
+if platform.system() == "Windows":
+    resolvedLink = None
+else:
+    from os import readlink
+    try:
+        resolvedLink = readlink(__file__)
+    except:
+        resolvedLink = None
+
+    if resolvedLink and resolvedLink[0] != "/":
+        resolvedLink = join(dirname(__file__), resolvedLink)
+    if resolvedLink:
+        #print "Symlink found, using %s instead" % resolvedLink
+        execv(resolvedLink, [resolvedLink] + argv[1:])
+
+path = getcwd()
+
+if ".gitsim" not in __file__:
+    while not exists(join(path,".gitsim")):
+        path,extra = split(path)
+        if not extra:
+            break
+    issuesExec = join(path,".gitsim/git-simulations")
+    if exists(issuesExec):
+        #print "git-issues found in %s. Using it in place of the one in %s" % (issuesExec, __file__)
+        execv(issuesExec, [issuesExec]+ argv[1:])
+        assert ("This should never be called" and False)
+
+import sys
+import os
+import re
+import optparse
+
+import gitshelve
+
+try:
+    from cStringIO import StringIO
+except:
+    from StringIO import StringIO
+
+import cPickle
+
+from datetime   import datetime
+from subprocess import Popen, PIPE
+from os.path    import isdir, isfile, join, basename
+from tempfile   import mkstemp
+######################################################################
+
+iso_fmt       = "%Y%m%dT%H%M%S"
+options       = None
+cache_version = 1
+
+import time
+class Simulation:
+  def __init__(self,shelf,head,command):
+    self.shelf = shelf;
+    self.time = time.time()
+    self.head = head;
+    self.command = command;
+
+  def execute(self):
+    from subprocess import Popen
+    import tempfile;
+    tempOut,outName = tempfile.mkstemp(suffix=".out");
+    tempErr,errName = tempfile.mkstemp(suffix=".err");
+
+    proc = Popen(args,stdout=tempOut,stderr=tempErr)
+    proc.wait
+    os.close(tempOut);
+    os.close(tempErr);
+    self.commit(outName,errName);
+    os.unlink(outName);
+    os.unlink(errName);
+    return proc.returncode
+
+  def commit(self,outName,errName):
+    top,middle = self.pathParts()
+    outPath = 'stdout';
+    outHash = self.shelf.git('hash-object','-w','--path',outPath,outName);
+    errPath = 'stderr';
+    errHash = self.shelf.git('hash-object','-w','--path',errPath,errName);
+    cmdPath = 'command';
+    cmdHash = self.shelf.git('hash-object','-w','--path',cmdPath,'--stdin',input=' '.join(command));
+
+    buf = StringIO()
+    buf.write("100644 blob %s\t%s\n" % (outHash,'stdout'))
+    buf.write("100644 blob %s\t%s\n" % (errHash,'stderr'))
+    buf.write("100644 blob %s\t%s\n" % (cmdHash,'command'))
+    print buf.getvalue();
+    treeHash = self.shelf.git('mktree', input = buf.getvalue())
+
+    buf = StringIO()
+    buf.write("040000 tree %s\t%s\0" % (treeHash,middle))
+    midHash = self.shelf.git('mktree', '-z', input = buf.getvalue())
+    print buf.getvalue();
+
+    buf = StringIO()
+    buf.write("040000 tree %s\t%s\0" % (midHash,top))
+    topHash = self.shelf.git('mktree', '-z', input = buf.getvalue())
+    print buf.getvalue();
+
+    print topHash
+    if self.shelf.head:
+      newHEAD = self.shelf.git('commit-tree', topHash, '-p', self.shelf.head,input="");
+    else:
+      newHEAD = self.shelf.git('commit-tree', topHash, input="");
+
+    self.shelf.update_head(newHEAD)
+
+    
+
+  def path(self):
+    h = self.hash();
+    return "%s/%s/" % (h[:2],h[2:]) 
+
+  def pathParts(self):
+    h = self.hash();
+    return (h[:2],h[2:]) 
+
+  def hash(self):
+    return shelf.hash_blob( str(self) )
+
+  def __str__(self):
+    return "%s %s <%s>" % (self.time, self.head, ' '.join(self.command))
+
+
+class SimList:
+  def __init__(self,shelf):
+    self.shelf = shelf;
+    self.dirty = False;
+
+
+  def close(self):
+    if self.dirty:
+      self.shelf.sync()
+
+
+
+if __name__ == '__main__':
+
+  import optparse
+  parser = optparse.OptionParser();
+  (options, args) = parser.parse_args();
+
+  if len(args) == 0:
+      parser.print_help()
+      sys.exit(1)
+
+  command = args[0]
+  args    = args[1:]
+
+  if command == "init":
+      from os.path import split, join, exists, dirname
+      from os import getcwd, makedirs
+      from shutil import copy
+      path = getcwd()
+      while not exists(join(path,".git")):
+          path,extra = split(path)
+          if not extra:
+              print "Unable to find a git repository. "
+              print "Make sure you ran `git init` at some point."
+              sys.exit(1)
+      issuesdir = join(path,".gitsim")
+      if exists(issuesdir):
+          print "git-sim helper directory %s already exists." % issuesdir
+          print "Doing nothing."
+          sys.exit(1)
+      makedirs(issuesdir)
+      copy(__file__, issuesdir)
+      copy(join(dirname(__file__), "gitshelve.py"), issuesdir)
+      copy(join(dirname(__file__), "t_gitshelve.py"), issuesdir)
+      copy(join(dirname(__file__), "README.textile"), issuesdir)
+      copy(join(dirname(__file__), "LICENSE"), issuesdir)
+      sys.exit(0)
+
+######################################################################
+
+  elif command == "exec":
+    simlist = SimList
+    HEAD = gitshelve.git('rev-parse',"HEAD");
+    shelf = gitshelve.open(branch="sims");
+    sim = Simulation(shelf,HEAD,args[1:]);
+    print "Saving reference to HEAD:",HEAD;
+    print "Made a simulation named:" + sim.hash();
+    
+    sim.execute();
