@@ -66,6 +66,41 @@ iso_fmt       = "%Y%m%dT%H%M%S"
 options       = None
 cache_version = 1
 
+def gitHEAD():
+  """Returns the current HEAD"""
+  return gitshelve.git('rev-parse',"HEAD");
+
+def stashTree():
+  """Creates a stash a la 'git stash create' and returns the hash, if no stash 
+  needs to be created, returns gitHEAD"""
+  stash = gitshelve.git("stash","create")
+  if stash == "":
+    return gitHEAD()
+  return stash
+
+
+def mergeTree(path,tree,head):
+  """Merges a simulation directory at path, with tree hash tree, into head and 
+  returns a new hash that includes the tree and path, along with head. Currently
+  requires that path not exist in head"""
+  import shutil
+  import tempfile
+  # make a new temporary index
+  tempOut,outName = tempfile.mkstemp(suffix=".idx");
+  os.close(tempOut);
+  env = os.environ.copy();
+ # gitIndex = gitshelve.git('rev-parse','--git-dir') + "/path";
+ 
+  print "p", path
+  env['GIT_INDEX_FILE'] = outName;
+  gitshelve.git('read-tree',head,env=env);
+  gitshelve.git('read-tree','--prefix='+path + '/',tree,env=env);
+  tree = gitshelve.git('write-tree',env=env);
+  os.unlink(outName); 
+
+  return tree;
+
+
 
 def executeSimulation(sim,quiet=False):
   from subprocess import Popen
@@ -93,8 +128,6 @@ class SimInfo:
     self.id = id;
     self.command = command;
 
-  
-
 import time
 class Simulation:
   def __init__(self,shelf,path,head,command):
@@ -112,7 +145,7 @@ class Simulation:
     errPath = 'stderr';
     errHash = self.shelf.git('hash-object','-w','--path',errPath,errName);
     cmdPath = 'command';
-    cmdHash = self.shelf.git('hash-object','-w','--path',cmdPath,'--stdin',input=' '.join(command));
+    cmdHash = self.shelf.git('hash-object','-w','--path',cmdPath,'--stdin',input=' '.join(self.info.command));
 
     buf = StringIO()
     buf.write("100644 blob %s\t%s\n" % (outHash,'stdout'))
@@ -120,12 +153,11 @@ class Simulation:
     buf.write("100644 blob %s\t%s\n" % (cmdHash,'command'))
     treeHash = self.shelf.git('mktree', input = buf.getvalue())
 
-    parts = self.pathParts();
-    parts.reverse();
-    for part in parts:
-      buf = StringIO()
-      buf.write("040000 tree %s\t%s\0" % (treeHash,part))
-      treeHash = self.shelf.git('mktree', '-z', input = buf.getvalue())
+
+    print treeHash
+    treeHash = mergeTree(self.path(),treeHash,self.info.head);
+    print treeHash
+
 
     newHEAD = self.shelf.git('commit-tree', treeHash, '-p', self.info.head,input="");
     self.info.id = newHEAD;
@@ -169,6 +201,8 @@ def fromCSV(data):
     
 
 class SimList:
+  """represents a list of all simulations executed. The list is stored as a csv in
+  a separate git branch (sims) in all_runs"""
   def __init__(self,shelf):
     from csv import DictReader;
     self.shelf = shelf;
@@ -197,7 +231,8 @@ class SimList:
 
 
 def niceName(id):
-  return gitshelve.git('describe','--always', id);
+  """for any hash, returns a nicer (shorter) way to describe it"""
+  return gitshelve.git('describe','--always', '--tags', id);
 
 if __name__ == '__main__':
 
@@ -210,9 +245,11 @@ where <command> is one of:
   
   exec <command line>: execute <command line>, saving state of the tree and capturing output
   
-  list : show all saved executed simulations
+  list : show all saved executed simulations, including an 'id' so you check it out
 
   checkout <id or #> : recreate the state of the tree from this simulation, along with the output
+
+  tag <name> <id or #>: tag the experiment with a more helpful moniker, this will become its id.
 """);
   parser.disable_interspersed_args() # we are, after all, execing.
 
@@ -227,7 +264,7 @@ where <command> is one of:
                   action  = "store",
                   dest    = "prefix",
                   default = None,
-                  help    = "(exec): use this directory to store files from imulation")
+                  help    = "(exec): use this directory to store files from simulation")
 
 
 
@@ -245,7 +282,7 @@ where <command> is one of:
 ######################################################################
 
   if command == "exec":
-    HEAD = gitshelve.git('rev-parse',"HEAD");
+    HEAD = stashTree() 
     import datetime;
     prefix = prefix or "simulations/" + str(datetime.date.today()) + "/" + str(time.time());
     sim = Simulation(shelf,prefix,HEAD,args);
@@ -274,6 +311,7 @@ where <command> is one of:
       print "%-5d %s\t%-10s\t%-s" % (i,timeString, ' '.join(sim.command), name);
       i = i + 1;
 
+######################################################################
   elif command == "checkout":
     if len(args) == 0:
       parser.print_help()
@@ -286,17 +324,14 @@ where <command> is one of:
     else:
       print "Checked out state saved from " + args[0] + " (" + niceName(desc) + ")";
 
-  elif command == "checkout":
-    if len(args) == 0:
+######################################################################
+  elif command == "tag":
+    if len(args) < 2:
       parser.print_help()
       sys.exit(1)
 
-    desc = simlist.findCommit(args[0]);
-    gitshelve.git('checkout',desc)
-    if args[0].startswith(niceName(desc)):
-      print "Checked out state saved from " + args[0];
-    else:
-      print "Checked out state saved from " + args[0] + " (" + niceName(desc) + ")";
+    desc = simlist.findCommit(args[1]);
+    gitshelve.git('tag',args[0], desc)
  
   simlist.close();
   shelf.sync()

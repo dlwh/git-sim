@@ -86,8 +86,12 @@ def git(cmd, *args, **kwargs):
                 print "EOF"
 
         environ = None
+        if kwargs.has_key('env'):
+            environ = kwargs['env']
+
         if kwargs.has_key('repository'):
-            environ = os.environ.copy()
+            if environ == None:
+                environ = os.environ.copy()
             environ['GIT_DIR'] = kwargs['repository']
 
             git_dir = environ['GIT_DIR']
