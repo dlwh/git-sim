@@ -481,8 +481,11 @@ class gitshelve(dict):
             raise KeyError(path)
 
     def __contains__(self, path):
-        d = self.get_tree(path)
-        return len(d.keys()) == 1 and d.has_key('__book__')
+        try:
+          d = self.get_tree(path)
+          return len(d.keys()) == 1 and d.has_key('__book__')
+        except KeyError:
+          return False;
 
     def walker(self, kind, objects, path = ''):
         for item in objects.items():

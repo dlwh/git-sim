@@ -66,31 +66,47 @@ iso_fmt       = "%Y%m%dT%H%M%S"
 options       = None
 cache_version = 1
 
-import time
-class Simulation:
-  def __init__(self,shelf,head,command):
-    self.shelf = shelf;
-    self.time = time.time()
+
+def executeSimulation(sim,quiet=False):
+  from subprocess import Popen
+  import tempfile;
+  tempOut,outName = tempfile.mkstemp(suffix=".out");
+  tempErr,errName = tempfile.mkstemp(suffix=".err");
+  if not quiet:
+    tee= ['tee', '/dev/tty'] # from stack overflow
+    proc = Popen(sim.info.command,stdout=PIPE,stderr=PIPE)
+    teeOutProc = Popen(tee, stdin=proc.stdout, stdout=tempOut);
+    teeErrProc = Popen(tee, stdin=proc.stderr, stdout=tempErr);
+    rc = proc.wait()
+  else:
+    proc = Popen(sim.info.command,stdout=tempOut,stderr=tempErr)
+    rc = proc.wait()
+  os.close(tempOut);
+  os.close(tempErr);
+  return (rc,outName,errName);
+
+class SimInfo:
+  def __init__(self,date,time,id,head,command):
+    self.date = date;
+    self.time = time;
     self.head = head;
+    self.id = id;
     self.command = command;
 
-  def execute(self):
-    from subprocess import Popen
-    import tempfile;
-    tempOut,outName = tempfile.mkstemp(suffix=".out");
-    tempErr,errName = tempfile.mkstemp(suffix=".err");
+  
 
-    proc = Popen(args,stdout=tempOut,stderr=tempErr)
-    proc.wait
-    os.close(tempOut);
-    os.close(tempErr);
-    self.commit(outName,errName);
-    os.unlink(outName);
-    os.unlink(errName);
-    return proc.returncode
+import time
+class Simulation:
+  def __init__(self,shelf,path,head,command):
+    self.shelf = shelf;
+    self.path_ = path;
+    self.info = SimInfo(datetime.datetime.now().strftime("%Y-%m-%d"),
+        time.time(),
+        '',
+        head,
+        command);
 
   def commit(self,outName,errName):
-    top,middle = self.pathParts()
     outPath = 'stdout';
     outHash = self.shelf.git('hash-object','-w','--path',outPath,outName);
     errPath = 'stderr';
@@ -102,62 +118,120 @@ class Simulation:
     buf.write("100644 blob %s\t%s\n" % (outHash,'stdout'))
     buf.write("100644 blob %s\t%s\n" % (errHash,'stderr'))
     buf.write("100644 blob %s\t%s\n" % (cmdHash,'command'))
-    print buf.getvalue();
     treeHash = self.shelf.git('mktree', input = buf.getvalue())
 
-    buf = StringIO()
-    buf.write("040000 tree %s\t%s\0" % (treeHash,middle))
-    midHash = self.shelf.git('mktree', '-z', input = buf.getvalue())
-    print buf.getvalue();
+    parts = self.pathParts();
+    parts.reverse();
+    for part in parts:
+      buf = StringIO()
+      buf.write("040000 tree %s\t%s\0" % (treeHash,part))
+      treeHash = self.shelf.git('mktree', '-z', input = buf.getvalue())
 
-    buf = StringIO()
-    buf.write("040000 tree %s\t%s\0" % (midHash,top))
-    topHash = self.shelf.git('mktree', '-z', input = buf.getvalue())
-    print buf.getvalue();
+    newHEAD = self.shelf.git('commit-tree', treeHash, '-p', self.info.head,input="");
+    self.info.id = newHEAD;
 
-    print topHash
-    if self.shelf.head:
-      newHEAD = self.shelf.git('commit-tree', topHash, '-p', self.shelf.head,input="");
-    else:
-      newHEAD = self.shelf.git('commit-tree', topHash, input="");
-
-    self.shelf.update_head(newHEAD)
-
-    
 
   def path(self):
-    h = self.hash();
-    return "%s/%s/" % (h[:2],h[2:]) 
+    return self.path_
 
   def pathParts(self):
-    h = self.hash();
-    return (h[:2],h[2:]) 
-
-  def hash(self):
-    return shelf.hash_blob( str(self) )
+    return self.path().split('/')
 
   def __str__(self):
-    return "%s %s <%s>" % (self.time, self.head, ' '.join(self.command))
+    return "%s %s <%s>" % (self.info.time, self.info.head, ' '.join(self.info.command))
 
+csvFields = ['date','time','command','id','head']
+
+def toCSV(infos):
+  from csv import writer;
+  sIO = StringIO();
+  wr = writer(sIO)
+
+  for info in infos:
+    wr.writerow( [info.date,info.time,' '.join(info.command), info.id, info.head ])
+
+  res = sIO.getvalue();
+  sIO.close();
+  return res;
+    
+
+def fromCSV(data):
+  from csv import DictReader;
+  sIO = StringIO(data);
+  reader = DictReader(sIO, csvFields);
+
+  res = [];
+  for row in reader:
+   command = row['command'].split(' ');
+   res.append(SimInfo(row['date'],float(row['time']),row['id'],row['head'], command)); 
+
+  return res;
+    
 
 class SimList:
   def __init__(self,shelf):
+    from csv import DictReader;
     self.shelf = shelf;
     self.dirty = False;
+    if "all_runs" in shelf:
+      data = shelf["all_runs"]
+      self.sims = fromCSV(data);
+    else:
+      self.sims = []
 
+  def add(self,sim):
+    self.sims.append(sim.info);
+    self.dirty = True
 
   def close(self):
     if self.dirty:
+      self.shelf["all_runs"] = toCSV(self.sims);
       self.shelf.sync()
 
+  def findCommit(self,desc):
+    try:
+      id = int(desc)
+      return self.sims[id-1].id;
+    except:
+      return desc
 
+
+def niceName(id):
+  return gitshelve.git('describe','--always', id);
 
 if __name__ == '__main__':
 
   import optparse
-  parser = optparse.OptionParser();
-  (options, args) = parser.parse_args();
+  parser = optparse.OptionParser(usage=
+"""
+usage: %prog [options] <command> [command-options]
 
+where <command> is one of:
+  
+  exec <command line>: execute <command line>, saving state of the tree and capturing output
+  
+  list : show all saved executed simulations
+
+  checkout <id or #> : recreate the state of the tree from this simulation, along with the output
+""");
+  parser.disable_interspersed_args() # we are, after all, execing.
+
+  parser.add_option("-q", "--quiet",
+                  action  = "store_true",
+                  dest    = "quiet",
+                  default = False,
+                  help    = "(exec): Don't log stdout/err of processes to terminal")
+
+  prefix = ""
+  parser.add_option("--prefix",
+                  action  = "store",
+                  dest    = "prefix",
+                  default = None,
+                  help    = "(exec): use this directory to store files from imulation")
+
+
+
+  (options, args) = parser.parse_args();
   if len(args) == 0:
       parser.print_help()
       sys.exit(1)
@@ -165,38 +239,64 @@ if __name__ == '__main__':
   command = args[0]
   args    = args[1:]
 
-  if command == "init":
-      from os.path import split, join, exists, dirname
-      from os import getcwd, makedirs
-      from shutil import copy
-      path = getcwd()
-      while not exists(join(path,".git")):
-          path,extra = split(path)
-          if not extra:
-              print "Unable to find a git repository. "
-              print "Make sure you ran `git init` at some point."
-              sys.exit(1)
-      issuesdir = join(path,".gitsim")
-      if exists(issuesdir):
-          print "git-sim helper directory %s already exists." % issuesdir
-          print "Doing nothing."
-          sys.exit(1)
-      makedirs(issuesdir)
-      copy(__file__, issuesdir)
-      copy(join(dirname(__file__), "gitshelve.py"), issuesdir)
-      copy(join(dirname(__file__), "t_gitshelve.py"), issuesdir)
-      copy(join(dirname(__file__), "README.textile"), issuesdir)
-      copy(join(dirname(__file__), "LICENSE"), issuesdir)
-      sys.exit(0)
+  shelf = gitshelve.open(branch="sims");
+  simlist = SimList(shelf)
 
 ######################################################################
 
-  elif command == "exec":
-    simlist = SimList
+  if command == "exec":
     HEAD = gitshelve.git('rev-parse',"HEAD");
-    shelf = gitshelve.open(branch="sims");
-    sim = Simulation(shelf,HEAD,args[1:]);
-    print "Saving reference to HEAD:",HEAD;
-    print "Made a simulation named:" + sim.hash();
+    import datetime;
+    prefix = prefix or "simulations/" + str(datetime.date.today()) + "/" + str(time.time());
+    sim = Simulation(shelf,prefix,HEAD,args);
+
+    (rc, outName, errName) = executeSimulation(sim,options.quiet);
+    if rc == 0:
+      sim.commit(outName,errName);
+    else:
+      print "Sim exited with error code " + str(rc);
+      print "Aborting commit!"
+    os.unlink(outName);
+    os.unlink(errName);
     
-    sim.execute();
+    simlist.add(sim);
+
+
+######################################################################
+
+  elif command == "list" or command == "ls":
+    from datetime import datetime
+    print "#          Date and Time   \tCommand   \t   Id";
+    i = 1
+    for sim in simlist.sims:
+      timeString = datetime.fromtimestamp(sim.time).ctime()
+      name = niceName(sim.id)
+      print "%-5d %s\t%-10s\t%-s" % (i,timeString, ' '.join(sim.command), name);
+      i = i + 1;
+
+  elif command == "checkout":
+    if len(args) == 0:
+      parser.print_help()
+      sys.exit(1)
+
+    desc = simlist.findCommit(args[0]);
+    gitshelve.git('checkout',desc)
+    if args[0].startswith(niceName(desc)):
+      print "Checked out state saved from " + args[0];
+    else:
+      print "Checked out state saved from " + args[0] + " (" + niceName(desc) + ")";
+
+  elif command == "checkout":
+    if len(args) == 0:
+      parser.print_help()
+      sys.exit(1)
+
+    desc = simlist.findCommit(args[0]);
+    gitshelve.git('checkout',desc)
+    if args[0].startswith(niceName(desc)):
+      print "Checked out state saved from " + args[0];
+    else:
+      print "Checked out state saved from " + args[0] + " (" + niceName(desc) + ")";
+ 
+  simlist.close();
+  shelf.sync()
